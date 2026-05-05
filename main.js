@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell, dialog, session } = require('electron');
+const { app, BrowserWindow, Menu, shell, dialog, session, ipcMain } = require('electron');
 const path = require('path');
 
 let mainWindow;
@@ -12,39 +12,32 @@ function createWindow() {
     height: 900,
     minWidth: 1024,
     minHeight: 700,
-    title: 'RecreaSoft — Quintal Turma da Tia Carol',
+    title: 'RecreaSoft – Quintal Turma da Tia Carol',
     icon: path.join(__dirname, 'assets', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      // Permite localStorage persistir entre sessões
       partition: 'persist:recreasoft',
     },
     backgroundColor: '#EFF6FF',
     show: false,
-    // Barra de título nativa do Windows
     titleBarStyle: 'default',
   });
 
-  // Carregar o app
   mainWindow.loadFile(path.join(__dirname, 'app', 'index.html'));
 
-  // Mostrar quando estiver pronto (sem flash branco)
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
     mainWindow.maximize();
     mainWindow.focus();
   });
 
-  // Links externos abrem no navegador padrão
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: 'deny' };
   });
 
-  // Confirmar antes de fechar se houver atendimentos ativos
-  // Backup automático ao fechar
   mainWindow.on('close', async (e) => {
     const choice = dialog.showMessageBoxSync(mainWindow, {
       type: 'question',
@@ -57,7 +50,6 @@ function createWindow() {
     });
     if (choice === 1) { e.preventDefault(); return; }
 
-    // Salvar backup automático antes de fechar
     try {
       const dados = await mainWindow.webContents.executeJavaScript(
         'localStorage.getItem("recreasoft_state_v3") || localStorage.getItem("recreasoft_state_v2")'
@@ -67,16 +59,15 @@ function createWindow() {
         const backupDir = path.join(app.getPath('userData'), 'backups');
         if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
         const now = new Date();
-        const ts = now.toISOString().replace(/[:.]/g, '-').slice(0,19);
+        const ts = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
         const backupPath = path.join(backupDir, `backup-${ts}.json`);
         fs.writeFileSync(backupPath, dados, 'utf8');
-        // Manter apenas os últimos 30 backups
         const files = fs.readdirSync(backupDir)
           .filter(f => f.startsWith('backup-') && f.endsWith('.json'))
           .sort().reverse();
         files.slice(30).forEach(f => fs.unlinkSync(path.join(backupDir, f)));
       }
-    } catch(err) {
+    } catch (err) {
       console.log('Backup automático falhou:', err.message);
     }
   });
@@ -84,7 +75,91 @@ function createWindow() {
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// IPC: IMPRESSÃO SILENCIOSA
+// Recebe HTML pronto e imprime em impressora laser sem diálogo
+// ─────────────────────────────────────────────────────────────────────────────
+ipcMain.on('imprimir', (event, htmlContent) => {
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  const htmlCompleto = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: Arial, sans-serif;
+    font-size: 11pt;
+    color: #000;
+    background: #fff;
+  }
+  @media print {
+    body { margin: 0; padding: 10mm; }
+    @page { margin: 10mm; size: A4; }
+  }
+</style>
+</head>
+<body>${htmlContent}</body>
+</html>`;
+
+  win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(htmlCompleto)}`);
+
+  win.webContents.on('did-finish-load', () => {
+    // Aguarda renderização completa antes de imprimir
+    setTimeout(() => {
+      win.webContents.print(
+        {
+          silent: true,          // sem diálogo de impressão
+          printBackground: true, // imprime backgrounds coloridos
+          color: false,          // laser P&B
+          margins: {
+            marginType: 'custom',
+            top: 0.4, bottom: 0.4, left: 0.4, right: 0.4,
+          },
+        },
+        (success, errorType) => {
+          if (!success) {
+            console.error('Erro ao imprimir:', errorType);
+          }
+          win.close();
+        }
+      );
+    }, 800);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IPC: IMPRESSÃO COM DIÁLOGO (fallback manual)
+// ─────────────────────────────────────────────────────────────────────────────
+ipcMain.on('imprimir-dialogo', (event, htmlContent) => {
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: { contextIsolation: true, nodeIntegration: false },
+  });
+
+  const htmlCompleto = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+    body { font-family: Arial, sans-serif; font-size: 11pt; margin: 0; padding: 10mm; }
+    @media print { @page { size: A4; margin: 10mm; } }
+  </style></head><body>${htmlContent}</body></html>`;
+
+  win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(htmlCompleto)}`);
+  win.webContents.on('did-finish-load', () => {
+    setTimeout(() => {
+      win.webContents.print({ silent: false, printBackground: true }, () => win.close());
+    }, 600);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Menu da aplicação
+// ─────────────────────────────────────────────────────────────────────────────
 function buildMenu() {
   const template = [
     {
@@ -99,7 +174,7 @@ function buildMenu() {
           label: 'Ferramentas de desenvolvedor',
           accelerator: 'F12',
           click: () => mainWindow?.webContents.toggleDevTools(),
-          visible: false, // Oculto mas disponível via F12
+          visible: false,
         },
         { type: 'separator' },
         {
@@ -165,7 +240,7 @@ function buildMenu() {
               title: 'Restaurar backup',
               message: 'Selecione o backup para restaurar:',
               detail: 'Os dados atuais serão substituídos.',
-              buttons: [...files.map(f => f.replace('backup-','').replace('.json','')), 'Cancelar'],
+              buttons: [...files.map(f => f.replace('backup-', '').replace('.json', '')), 'Cancelar'],
               cancelId: files.length,
             });
             if (response === files.length) return;
@@ -178,7 +253,6 @@ function buildMenu() {
         {
           label: 'Abrir pasta de backups',
           click: () => {
-            const { shell } = require('electron');
             const backupDir = path.join(app.getPath('userData'), 'backups');
             const fs = require('fs');
             if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
@@ -197,7 +271,7 @@ function buildMenu() {
               detail: [
                 'Sistema de gestão de brinquedoteca',
                 'Quintal Turma da Tia Carol',
-                'Saquarema — RJ',
+                'Saquarema – RJ',
                 '',
                 'Dados salvos em:',
                 app.getPath('userData'),
@@ -229,7 +303,6 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-// Bloquear navegação para URLs externas
 app.on('web-contents-created', (_, contents) => {
   contents.on('will-navigate', (event, url) => {
     if (!url.startsWith('file://')) event.preventDefault();
